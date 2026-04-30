@@ -1,0 +1,26 @@
+# Build output
+/target/
+
+# Cargo lock — keep for binaries, ignore for libraries
+# (this is a binary, so Cargo.lock is kept — do NOT add it here)
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Generated / temporary
+*.log
+*.tmp
