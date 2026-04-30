@@ -2,7 +2,8 @@
 
 A custom command-line shell written in Rust, combining low-level POSIX OS
 mechanics (process management, pipes, signal handling) with an agentic LLM
-layer for natural-language command execution and error analysis.
+layer powered by Google Gemini for natural-language command execution and
+error analysis.
 
 ## Build & run
 
@@ -12,11 +13,15 @@ cargo build --release
 ./target/release/msh
 ```
 
-Set your Anthropic API key to enable AI features:
+Set your Gemini API key to enable AI features (free at [aistudio.google.com](https://aistudio.google.com)):
 
 ```sh
-export ANTHROPIC_API_KEY=sk-ant-...
+# Put it in .env
+echo 'GEMINI_API_KEY=AIza...' > .env
+
+# Launch and load it
 ./target/release/msh
+source .env
 ```
 
 Without the key the shell runs fully normally — AI features degrade gracefully
@@ -39,33 +44,39 @@ with a yellow warning instead of crashing.
 | Variable expansion | `$VAR`, `${VAR}`, `$?`, `$$` |
 | Quoting | `'literal $HOME'`, `"expanded $HOME"` |
 | Comments | `# anything after hash` |
+| Tab completion | `cat REA<TAB>` → `cat README.md` |
 | Ctrl-C kills foreground job, not shell | (signal handling) |
 
 ### Builtins
 
 `cd [dir|-]` · `pwd` · `echo [-n]` · `export VAR=VAL` · `unset VAR` ·
-`jobs` · `help` · `exit [N]`
+`source <file>` · `jobs` · `help` · `exit [N]`
 
-### Agentic layer (requires `ANTHROPIC_API_KEY`)
+### Agentic layer (requires `GEMINI_API_KEY`)
 
 **Natural-language intent** — prefix any input with `?`:
 
 ```
-aura:~$ ? find all rust source files modified in the last week
+~ ❯ ? find all rust source files modified in the last week
 →  find . -name "*.rs" -mtime -7
 [Y/n]: y
-./src/main.rs
-./src/parser.rs
+./main.rs
+./parser.rs
 ```
 
 **Error Autopsy** — when a command exits non-zero, AuraShell captures its
-stderr and asks the LLM for a concise diagnosis:
+stderr and asks Gemini for a concise diagnosis:
 
 ```
-aura:~$ git pussh origin main
+~ ❯ git pussh origin main
 git: 'pussh' is not a git command. Did you mean 'push'?
 ✦ Autopsy: 'pussh' is a typo — run `git push origin main` instead.
 ```
+
+## Demo & Testing
+
+See [TESTING.md](TESTING.md) for a full walkthrough with expected output for
+every feature — suitable for a class demo or portfolio review.
 
 ## Architecture
 
@@ -75,9 +86,9 @@ AuraShell/
 ├── tokenizer.rs   — lexer: words, pipes, redirections (including 2>, 2>&1), &&, ;
 ├── parser.rs      — tokens → Script { pipelines, connectors }
 ├── executor.rs    — fork/exec, pipe wiring, signal handling, stderr capture
-├── builtins.rs    — cd, pwd, export, unset, echo, jobs, help, exit
+├── builtins.rs    — cd, pwd, export, unset, source, echo, jobs, help, exit
 ├── jobs.rs        — background job table (Mutex<Vec<Job>>)
-└── agent.rs       — Anthropic API client: translate_intent, analyze_error
+└── agent.rs       — Gemini API client: translate_intent, analyze_error
 ```
 
 **Pipeline:** `input line → tokenize → parse → execute_script → execute_pipeline`
@@ -107,8 +118,9 @@ runtime lives in `main.rs`; after `execute_script` returns with autopsy data,
 | `nix` | POSIX syscalls (fork, dup2, pipe, sigaction, tcsetpgrp, …) |
 | `libc` | `_exit` in child after fork |
 | `tokio` | Async runtime for HTTP calls |
-| `reqwest` | HTTP client for Anthropic API |
+| `reqwest` | HTTP client for Gemini API |
 | `serde` / `serde_json` | JSON serialization for API requests/responses |
+| `rustyline` | Line editing, history, tab completion |
 
 ## Known limitations
 

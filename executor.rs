@@ -33,6 +33,10 @@ static LAST_STATUS: AtomicI32 = AtomicI32::new(0);
 static SHELL_PGID: AtomicI32 = AtomicI32::new(0);
 static SHELL_INTERACTIVE: AtomicBool = AtomicBool::new(false);
 static SIGCHLD_PENDING: AtomicBool = AtomicBool::new(false);
+/// Set by the `exit` builtin so the main loop can clean up (save history,
+/// etc.) before calling `std::process::exit`.
+static EXIT_REQUESTED: AtomicBool = AtomicBool::new(false);
+static EXIT_CODE: AtomicI32 = AtomicI32::new(0);
 
 pub fn last_exit_status() -> i32 {
     LAST_STATUS.load(Ordering::Relaxed)
@@ -40,6 +44,20 @@ pub fn last_exit_status() -> i32 {
 
 fn set_last_exit_status(v: i32) {
     LAST_STATUS.store(v, Ordering::Relaxed);
+}
+
+pub fn request_exit(code: i32) {
+    EXIT_CODE.store(code, Ordering::Relaxed);
+    EXIT_REQUESTED.store(true, Ordering::Relaxed);
+}
+
+/// Returns `Some(code)` if the `exit` builtin has been called.
+pub fn pending_exit() -> Option<i32> {
+    if EXIT_REQUESTED.load(Ordering::Relaxed) {
+        Some(EXIT_CODE.load(Ordering::Relaxed))
+    } else {
+        None
+    }
 }
 
 /// The result of running a single pipeline.
@@ -364,7 +382,11 @@ pub fn execute_pipeline(p: &Pipeline) -> PipelineResult {
                     break;
                 }
                 Ok(WaitStatus::Signaled(_, sig, _)) => {
-                    if i == pids.len() - 1 { status = 128 + sig as i32; }
+                    if i == pids.len() - 1 {
+                        status = 128 + sig as i32;
+                        // Child may have left the cursor mid-line.
+                        eprintln!();
+                    }
                     break;
                 }
                 Ok(_) => continue,

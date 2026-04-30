@@ -1,26 +1,20 @@
 //! Agentic layer: natural-language → command translation and error autopsy.
 //!
-//! Both functions call the Anthropic Messages API using the ANTHROPIC_API_KEY
-//! environment variable. They are intentionally thin: one system prompt, one
-//! user turn, one text response. No conversation history is kept.
-//!
-//! Model: claude-haiku-4-5 — lowest latency, appropriate for a shell tool.
+//! Calls the Google Gemini API using GEMINI_API_KEY environment variable.
+//! One system prompt, one user turn, one text response. No history kept.
 
 use reqwest::Client;
 use serde_json::{json, Value};
 
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const MODEL: &str = "claude-haiku-4-5-20251001";
-// Keep responses short; a command or a 2-sentence explanation needs < 256 tokens.
+const MODEL: &str = "gemini-2.5-flash";
 const MAX_TOKENS: u32 = 256;
 
-/// Shared HTTP client — constructed once per call site (cheap with reqwest).
 fn client() -> Client {
     Client::new()
 }
 
 fn api_key() -> Result<String, AgentError> {
-    std::env::var("ANTHROPIC_API_KEY").map_err(|_| AgentError::NoApiKey)
+    std::env::var("GEMINI_API_KEY").map_err(|_| AgentError::NoApiKey)
 }
 
 #[derive(Debug)]
@@ -35,7 +29,7 @@ impl std::fmt::Display for AgentError {
         match self {
             AgentError::NoApiKey => write!(
                 f,
-                "ANTHROPIC_API_KEY not set — export it to enable AI features"
+                "GEMINI_API_KEY not set — run: export GEMINI_API_KEY=your-key"
             ),
             AgentError::Http(e) => write!(f, "API request failed: {}", e),
             AgentError::Parse(e) => write!(f, "API response parse error: {}", e),
@@ -43,22 +37,31 @@ impl std::fmt::Display for AgentError {
     }
 }
 
-/// POST one user message to the Anthropic Messages API and return the
-/// assistant's text reply, trimmed of leading/trailing whitespace.
+/// POST to Gemini generateContent endpoint and return the model's text reply.
 async fn call(system: &str, user: &str) -> Result<String, AgentError> {
     let key = api_key()?;
 
+    let url = format!(
+        "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+        MODEL, key
+    );
+
     let body = json!({
-        "model": MODEL,
-        "max_tokens": MAX_TOKENS,
-        "system": system,
-        "messages": [{ "role": "user", "content": user }]
+        "system_instruction": {
+            "parts": [{ "text": system }]
+        },
+        "contents": [{
+            "role": "user",
+            "parts": [{ "text": user }]
+        }],
+        "generationConfig": {
+            "maxOutputTokens": MAX_TOKENS,
+            "temperature": 0.2
+        }
     });
 
     let resp = client()
-        .post(API_URL)
-        .header("x-api-key", key)
-        .header("anthropic-version", "2023-06-01")
+        .post(&url)
         .header("content-type", "application/json")
         .json(&body)
         .send()
@@ -79,16 +82,13 @@ async fn call(system: &str, user: &str) -> Result<String, AgentError> {
         return Err(AgentError::Http(format!("HTTP {}: {}", status, msg)));
     }
 
-    json["content"][0]["text"]
+    json["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
         .map(|s| s.trim().to_string())
         .ok_or_else(|| AgentError::Parse(format!("unexpected shape: {}", json)))
 }
 
 /// Translate a natural-language description into a single shell command.
-///
-/// The model is instructed to return ONLY the command — no markdown, no
-/// explanation — so the caller can pass the result directly to the parser.
 pub async fn translate_intent(input: &str) -> Result<String, AgentError> {
     let system = "\
 You are a Unix shell command translator. \
@@ -101,9 +101,6 @@ If the request is ambiguous, emit the safest, most common interpretation.";
 }
 
 /// Explain why a command failed, given its stderr output.
-///
-/// Returns a 1–2 sentence plain-text explanation suitable for printing
-/// directly in a terminal. No markdown formatting.
 pub async fn analyze_error(command: &str, stderr: &str) -> Result<String, AgentError> {
     let system = "\
 You are a Unix shell error analyst. \

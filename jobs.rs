@@ -16,6 +16,7 @@ pub enum JobState {
 #[derive(Debug)]
 pub struct Job {
     pub id: i32,
+    #[allow(dead_code)]
     pub pgid: Pid,
     pub pids: Vec<Pid>, // un-reaped child pids
     pub cmd: String,

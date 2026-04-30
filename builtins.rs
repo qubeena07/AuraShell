@@ -5,11 +5,12 @@
 use crate::executor::last_exit_status;
 use crate::jobs;
 use std::env;
+use std::fs;
 
 pub fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "cd" | "pwd" | "exit" | "export" | "unset" | "jobs" | "echo" | "help"
+        "cd" | "pwd" | "exit" | "export" | "unset" | "jobs" | "echo" | "help" | "source" | "."
     )
 }
 
@@ -29,6 +30,7 @@ pub fn run_builtin(args: &[String]) -> i32 {
         }
         "echo" => builtin_echo(args),
         "help" => builtin_help(),
+        "source" | "." => builtin_source(args),
         _ => 1,
     }
 }
@@ -90,7 +92,10 @@ fn builtin_exit(args: &[String]) -> i32 {
     } else {
         last_exit_status()
     };
-    std::process::exit(code);
+    // Signal the main loop to exit cleanly (save history, flush, etc.)
+    // instead of hard-exiting here and bypassing cleanup.
+    crate::executor::request_exit(code);
+    code
 }
 
 fn builtin_export(args: &[String]) -> i32 {
@@ -133,6 +138,54 @@ fn builtin_echo(args: &[String]) -> i32 {
     0
 }
 
+fn builtin_source(args: &[String]) -> i32 {
+    if args.len() < 2 {
+        eprintln!("source: usage: source <file>");
+        return 1;
+    }
+    let path = &args[1];
+    let text = match fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("source: {}: {}", path, e);
+            return 1;
+        }
+    };
+
+    let mut loaded = 0usize;
+    for (lineno, raw) in text.lines().enumerate() {
+        let line = raw.trim();
+        // skip blanks, comments, and `export` prefix
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        match line.find('=') {
+            None => {
+                eprintln!("source: {}:{}: no '=' in {:?}, skipping", path, lineno + 1, line);
+            }
+            Some(eq) => {
+                let key = line[..eq].trim();
+                let val = line[eq + 1..].trim().trim_matches('"').trim_matches('\'');
+                if key.is_empty() {
+                    eprintln!("source: {}:{}: empty key, skipping", path, lineno + 1);
+                    continue;
+                }
+                env::set_var(key, val);
+                loaded += 1;
+            }
+        }
+    }
+
+    println!(
+        "source: loaded {} variable{} from {}",
+        loaded,
+        if loaded == 1 { "" } else { "s" },
+        path
+    );
+    0
+}
+
 fn builtin_help() -> i32 {
     println!("msh — a mini shell (Rust)");
     println!();
@@ -143,6 +196,7 @@ fn builtin_help() -> i32 {
     println!("  export VAR=VAL  set environment variable");
     println!("  unset VAR       remove environment variable");
     println!("  jobs            list background jobs");
+    println!("  source <file>   load KEY=VALUE pairs from file into environment");
     println!("  help            show this help");
     println!("  exit [N]        exit the shell");
     println!();
