@@ -24,3 +24,5 @@
 # Generated / temporary
 *.log
 *.tmp
+
+out.txt
