@@ -17,6 +17,8 @@ fn api_key() -> Result<String, AgentError> {
     std::env::var("GEMINI_API_KEY").map_err(|_| AgentError::NoApiKey)
 }
 
+
+
 #[derive(Debug)]
 pub enum AgentError {
     NoApiKey,
