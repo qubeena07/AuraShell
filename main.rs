@@ -22,6 +22,7 @@ use rustyline::{Context, Editor, Helper};
 // ANSI helpers — only for agentic output, not normal shell output.
 const YELLOW: &str = "\x1b[33m";
 const CYAN: &str   = "\x1b[36m";
+const GREEN: &str  = "\x1b[32m";
 const BOLD: &str   = "\x1b[1m";
 const RESET: &str  = "\x1b[0m";
 
@@ -29,9 +30,6 @@ const RESET: &str  = "\x1b[0m";
 // Rustyline helper
 // ---------------------------------------------------------------------------
 
-/// Wires rustyline's completion, hinting, highlighting, and validation traits
-/// into a single struct. Only `Completer` has real logic; the rest are
-/// no-ops that satisfy the `Helper` bound.
 struct AuraHelper {
     completer: FilenameCompleter,
 }
@@ -42,12 +40,6 @@ impl AuraHelper {
     }
 }
 
-/// Delegate completion to `FilenameCompleter`.
-///
-/// We find the start of the current word (the token being typed) by scanning
-/// backwards from the cursor for whitespace. This lets completion work
-/// correctly regardless of how many words precede it on the line, e.g.:
-///   `cat src/ma<TAB>`  →  `cat src/main.rs`
 impl Completer for AuraHelper {
     type Candidate = Pair;
 
@@ -61,7 +53,6 @@ impl Completer for AuraHelper {
     }
 }
 
-/// No-op hinter — return `None` so no ghost-text hints are shown.
 impl Hinter for AuraHelper {
     type Hint = String;
     fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
@@ -69,14 +60,8 @@ impl Hinter for AuraHelper {
     }
 }
 
-/// No-op highlighter — return the line unchanged.
 impl Highlighter for AuraHelper {}
-
-/// No-op validator — every line is valid from rustyline's perspective
-/// (our parser handles real syntax errors).
 impl Validator for AuraHelper {}
-
-/// Marker trait that combines all four.
 impl Helper for AuraHelper {}
 
 // ---------------------------------------------------------------------------
@@ -105,7 +90,6 @@ fn make_prompt() -> String {
     } else {
         cwd
     };
-    // U+276F HEAVY RIGHT-POINTING ANGLE QUOTATION MARK — classic zsh-style prompt.
     format!("{} ❯ ", display)
 }
 
@@ -184,7 +168,161 @@ async fn handle_nl_query(query: &str) -> bool {
     }
 }
 
-async fn run_line(line: &str) {
+/// Multi-turn chat: send one message, print reply, loop for follow-ups.
+async fn handle_chat_query(query: &str, chat: &mut agent::ChatAgent) {
+    let result = send_chat(query, chat).await;
+    if !result {
+        return;
+    }
+    // Enter follow-up loop
+    loop {
+        eprint!("{}chat> {}", GREEN, RESET);
+        let _ = std::io::stderr().flush();
+        let mut line = String::new();
+        match std::io::stdin().lock().read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let line = line.trim().to_string();
+        if line.is_empty() || line == "exit" || line == "quit" {
+            break;
+        }
+        if !send_chat(&line, chat).await {
+            break;
+        }
+    }
+}
+
+/// Send one message to chat agent and print reply. Returns false on error.
+async fn send_chat(msg: &str, chat: &mut agent::ChatAgent) -> bool {
+    eprint!("{}⟳  thinking...{}", GREEN, RESET);
+    let _ = std::io::stderr().flush();
+    match chat.chat(msg).await {
+        Ok(reply) => {
+            eprint!("\r{:<60}\r", "");
+            println!("{}{}{}", GREEN, reply, RESET);
+            true
+        }
+        Err(e) => {
+            eprint!("\r{:<60}\r", "");
+            eprintln!("{}aura: chat error: {}{}", YELLOW, e, RESET);
+            false
+        }
+    }
+}
+
+/// Task planner: get steps from Gemini, confirm each, execute in order.
+async fn handle_plan_query(goal: &str) {
+    eprint!("{}⟳  planning...{}", CYAN, RESET);
+    let _ = std::io::stderr().flush();
+
+    let steps = match agent::plan_task(goal).await {
+        Ok(s) => {
+            eprint!("\r{:<60}\r", "");
+            s
+        }
+        Err(e) => {
+            eprint!("\r{:<60}\r", "");
+            eprintln!("{}aura: planner error: {}{}", YELLOW, e, RESET);
+            return;
+        }
+    };
+
+    let total = steps.len();
+    eprintln!("{}{}Plan ({} step{}):{}", CYAN, BOLD, total, if total == 1 { "" } else { "s" }, RESET);
+    for (i, step) in steps.iter().enumerate() {
+        eprintln!("  {}{}. {}{}", CYAN, i + 1, RESET, step);
+    }
+    eprintln!();
+
+    let mut aborted = false;
+    for (i, step) in steps.iter().enumerate() {
+        eprint!(
+            "{}Step {}/{}: {}{} {}[Y/n/skip/abort]: {}",
+            CYAN, i + 1, total, RESET, step, CYAN, RESET
+        );
+        let _ = std::io::stderr().flush();
+
+        let mut answer = String::new();
+        let _ = std::io::stdin().lock().read_line(&mut answer);
+        let answer = answer.trim().to_lowercase();
+
+        match answer.as_str() {
+            "abort" | "a" => {
+                eprintln!("{}✗ Aborted at step {}/{}{}", YELLOW, i + 1, total, RESET);
+                aborted = true;
+                break;
+            }
+            "skip" | "s" => {
+                eprintln!("{}  skipped{}", YELLOW, RESET);
+                continue;
+            }
+            "" | "y" => {
+                let (status, autopsy) = execute_str(step);
+                if let Some((command, stderr)) = autopsy {
+                    run_autopsy(&command, &stderr).await;
+                }
+                if status != 0 && i + 1 < total {
+                    eprint!(
+                        "{}Step {} failed (exit {}). Continue? [Y/n]: {}",
+                        YELLOW, i + 1, status, RESET
+                    );
+                    let _ = std::io::stderr().flush();
+                    let mut cont = String::new();
+                    let _ = std::io::stdin().lock().read_line(&mut cont);
+                    let cont = cont.trim().to_lowercase();
+                    if cont == "n" || cont == "no" {
+                        eprintln!("{}✗ Aborted at step {}/{}{}", YELLOW, i + 1, total, RESET);
+                        aborted = true;
+                        break;
+                    }
+                }
+            }
+            _ => {
+                eprintln!("{}  skipped (unrecognised input){}", YELLOW, RESET);
+                continue;
+            }
+        }
+    }
+
+    if !aborted {
+        eprintln!("{}✓ Plan complete{}", GREEN, RESET);
+    }
+}
+
+async fn run_line(line: &str, chat: &mut agent::ChatAgent) {
+    // ?? — multi-turn chat (check before single ? to avoid prefix clash)
+    if let Some(query) = line.strip_prefix("??") {
+        let query = query.trim();
+        if query == "reset" {
+            chat.reset();
+            println!("{}chat history cleared{}", CYAN, RESET);
+            return;
+        }
+        if query == "history" {
+            chat.print_history();
+            return;
+        }
+        if query.is_empty() {
+            eprintln!("aura: ?? requires a message, e.g.  ?? how do I find large files");
+            return;
+        }
+        handle_chat_query(query, chat).await;
+        return;
+    }
+
+    // ?! — task planner
+    if let Some(goal) = line.strip_prefix("?!") {
+        let goal = goal.trim();
+        if goal.is_empty() {
+            eprintln!("aura: ?! requires a goal, e.g.  ?! create a rust hello world project");
+            return;
+        }
+        handle_plan_query(goal).await;
+        return;
+    }
+
+    // ? — single-shot NL→command translation
     if let Some(query) = line.strip_prefix('?') {
         let query = query.trim();
         if query.is_empty() {
@@ -195,7 +333,26 @@ async fn run_line(line: &str) {
         return;
     }
 
-    let (_, autopsy) = execute_str(line);
+    let (code, autopsy) = execute_str(line);
+
+    // Command-not-found suggestion (exit 127)
+    if code == 127 {
+        let cmd_name = line.split_whitespace().next().unwrap_or(line);
+        eprint!("{}⟳  looking up suggestion...{}", YELLOW, RESET);
+        let _ = std::io::stderr().flush();
+        let stderr_hint = format!("{}: command not found", cmd_name);
+        match agent::analyze_error(cmd_name, &stderr_hint).await {
+            Ok(suggestion) => {
+                eprint!("\r{:<60}\r", "");
+                print_autopsy(&suggestion);
+            }
+            Err(_) => {
+                eprint!("\r{:<60}\r", "");
+            }
+        }
+        return;
+    }
+
     if let Some((command, stderr)) = autopsy {
         run_autopsy(&command, &stderr).await;
     }
@@ -213,7 +370,6 @@ fn save_history(rl: &mut AuraEditor) {
     }
 }
 
-// current_thread: we block on readline and API calls — no concurrent tasks.
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     executor::init_shell();
@@ -236,6 +392,8 @@ async fn main() {
         let _ = rl.load_history(&path);
     }
 
+    let mut chat = agent::ChatAgent::new();
+
     loop {
         executor::reap_jobs();
 
@@ -253,7 +411,7 @@ async fn main() {
                     continue;
                 }
                 let _ = rl.add_history_entry(&line);
-                run_line(&line).await;
+                run_line(&line, &mut chat).await;
             }
 
             Err(ReadlineError::Interrupted) => {

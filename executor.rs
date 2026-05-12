@@ -6,6 +6,7 @@
 //! commented; the surrounding code is plain Rust.
 
 use crate::builtins::{is_builtin, run_builtin};
+use glob;
 use crate::jobs::{add_job, drain_done, mark_pid_reaped};
 use crate::parser::{Command, Connector, Pipeline, Script};
 
@@ -222,10 +223,10 @@ pub fn execute_script(script: &Script) -> (i32, Option<(String, String)>) {
 
     for (idx, pipeline) in script.pipelines.iter().enumerate() {
         if idx > 0 {
-            if let Connector::And = &script.connectors[idx - 1] {
-                if status != 0 {
-                    continue; // short-circuit &&
-                }
+            match &script.connectors[idx - 1] {
+                Connector::And if status != 0 => continue, // short-circuit &&
+                Connector::Or  if status == 0 => continue, // short-circuit ||
+                _ => {}
             }
         }
 
@@ -467,7 +468,34 @@ fn child_after_fork(
         flush_and_exit(rc);
     }
 
-    let argv = &p.commands[i].argv;
+    // Expand glob patterns in argv before exec.
+    let expanded_argv: Vec<String> = {
+        let mut out = Vec::new();
+        for arg in &p.commands[i].argv {
+            if arg.contains('*') || arg.contains('?') || arg.contains('[') {
+                match glob::glob(arg) {
+                    Ok(paths) => {
+                        let mut matched: Vec<String> = paths
+                            .filter_map(|p| p.ok())
+                            .map(|p| p.display().to_string())
+                            .collect();
+                        if matched.is_empty() {
+                            out.push(arg.clone()); // no match: pass literal
+                        } else {
+                            matched.sort();
+                            out.append(&mut matched);
+                        }
+                    }
+                    Err(_) => out.push(arg.clone()),
+                }
+            } else {
+                out.push(arg.clone());
+            }
+        }
+        out
+    };
+
+    let argv = &expanded_argv;
     let prog = match CString::new(argv[0].as_str()) {
         Ok(c) => c,
         Err(_) => { eprintln!("msh: invalid program name"); flush_and_exit(127); }

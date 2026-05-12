@@ -187,7 +187,7 @@ fn builtin_source(args: &[String]) -> i32 {
 }
 
 fn builtin_help() -> i32 {
-    println!("msh — a mini shell (Rust)");
+    println!("AuraShell — an AI-powered Unix shell");
     println!();
     println!("Builtins:");
     println!("  cd [dir|-]      change directory ('-' = previous)");
@@ -203,8 +203,20 @@ fn builtin_help() -> i32 {
     println!("Features:");
     println!("  pipes:        cmd1 | cmd2 | cmd3");
     println!("  redirection:  cmd > out, cmd >> out, cmd < in");
+    println!("  chaining:     cmd1 && cmd2   (run if success)");
+    println!("                cmd1 || cmd2   (run if failure)");
     println!("  background:   long_running &");
+    println!("  glob:         ls *.rs, cat src/*.toml");
     println!("  expansion:    echo $HOME, echo \"${{USER}}!\"");
     println!("  Ctrl-C kills the foreground job, not the shell.");
+    println!();
+    println!("AI agents (requires GEMINI_API_KEY):");
+    println!("  ? <desc>        translate English to a shell command");
+    println!("  ?? <question>   multi-turn chat with memory (follow-ups work!)");
+    println!("  ?? reset        clear chat history");
+    println!("  ?? history      show chat history");
+    println!("  ?! <goal>       plan a multi-step task and execute step by step");
+    println!("  (auto)          error autopsy when a command fails");
+    println!("  (auto)          command-not-found suggestion (exit 127)");
     0
 }

@@ -2,7 +2,7 @@
 //!
 //! Grammar (informal):
 //!   script   := pipeline (connector pipeline)*
-//!   connector := ';' | '&&'
+//!   connector := ';' | '&&' | '||'
 //!   pipeline := command ('|' command)* ['&']
 //!   command  := WORD (WORD | redirection)*
 //!   redir    := '<' WORD | '>' WORD | '>>' WORD | '2>' WORD | '2>>' WORD | '2>&1'
@@ -36,9 +36,11 @@ pub enum Connector {
     Semi,
     /// `&&` — run next only if previous exit status == 0
     And,
+    /// `||` — run next only if previous exit status != 0
+    Or,
 }
 
-/// A full parsed line: one or more pipelines separated by `;` or `&&`.
+/// A full parsed line: one or more pipelines separated by `;`, `&&`, or `||`.
 #[derive(Debug, Default)]
 pub struct Script {
     /// pipelines[i] is connected to pipelines[i+1] by connectors[i].
@@ -159,11 +161,15 @@ fn parse_pipeline<'a>(
                 i += 1;
             }
 
+            Token::OrOr => {
+                i += 1;
+                push_last_command(&mut pipeline, cur);
+                return Ok((pipeline, &tokens[i..], Some(Connector::Or)));
+            }
+
             Token::Amp => {
                 pipeline.background = true;
                 i += 1;
-                // '&' ends the pipeline; anything after is a new statement
-                // (e.g. `sleep 5 & echo hi`). Treat as Semi-connected.
                 push_last_command(&mut pipeline, cur);
                 return Ok((pipeline, &tokens[i..], Some(Connector::Semi)));
             }

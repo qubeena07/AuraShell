@@ -2,7 +2,7 @@
 //!
 //! Handles:
 //!   - whitespace separation
-//!   - metacharacters: |  <  >  >>  &&  &  ;  2>  2>>  2>&1
+//!   - metacharacters: |  ||  <  >  >>  &&  &  ;  2>  2>>  2>&1
 //!   - single quotes  '...'  : literal, no expansion
 //!   - double quotes  "..."  : $VAR expansion + backslash escapes for " \ $ `
 //!   - backslash outside quotes: escapes next char
@@ -16,6 +16,8 @@ use std::env;
 pub enum Token {
     Word(String),
     Pipe,
+    /// ||  — run next pipeline only if previous failed
+    OrOr,
     RedirIn,
     RedirOut,
     RedirAppend,
@@ -51,7 +53,16 @@ pub fn tokenize(line: &str) -> Vec<Token> {
 
         // metacharacters
         match chars[i] {
-            '|' => { tokens.push(Token::Pipe); i += 1; continue; }
+            '|' => {
+                i += 1;
+                if i < n && chars[i] == '|' {
+                    tokens.push(Token::OrOr);
+                    i += 1;
+                } else {
+                    tokens.push(Token::Pipe);
+                }
+                continue;
+            }
             '<' => { tokens.push(Token::RedirIn); i += 1; continue; }
             '>' => {
                 i += 1;
@@ -95,13 +106,10 @@ pub fn tokenize(line: &str) -> Vec<Token> {
         let mut buf = String::new();
         while i < n {
             let c = chars[i];
-            // Stop on whitespace, metacharacters, or a bare '2' that starts a
-            // stderr-redirect sequence (2> / 2>> / 2>&1).
             if c.is_whitespace() || matches!(c, '|' | '<' | '>' | '&' | ';' | '#') {
                 break;
             }
             if c == '2' && i + 1 < n && chars[i + 1] == '>' && !buf.is_empty() {
-                // e.g. "foo2>" — treat the trailing 2> as its own token next iter
                 break;
             }
             match c {
